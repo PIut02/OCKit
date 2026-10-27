@@ -17,6 +17,8 @@
   可配置 DefaultEFI/DefaultConfig/Checklist/BackupDir/GitHubToken/Timeout/
   Retries/Prerelease/Color；kext/snapshot/oc/backup 的 EFI 参数与 validate/check 的
   config 参数改为可选并支持设置回退
+- GitHub 镜像支持（对标 OCAT）：`GitHubMirror` 重写下载 URL（`{url}` 占位符或
+  纯前缀两种写法，下载时打印实际地址），`GitHubApi` 可替换 JSON API 基址
 - `smbios show/gen`（macserial 集成）
 - `oc download/upgrade/resync`（OpenCore 升级 + Sample.plist 键位同步）
 - `diff`（递归/仅键位）、`snapshot`（EFI 快照重建，含 PlugIns 子条目与内核段推断）

@@ -63,7 +63,9 @@ ockit settings validate   # 类型校验
 | `DefaultConfig` | validate/check 等的默认 config.plist | — |
 | `Checklist` | KextChecklist.plist 的额外查找位置 | — |
 | `BackupDir` | backup 默认输出目录 | EFI 同级 |
-| `GitHubToken` | GitHub API token（环境变量优先） | — |
+| `GitHubToken` | GitHub API token（环境变量优先）。**强烈建议配置**：匿名 API 每小时仅 60 次，`kext check` 一次就会用掉几十次 | — |
+| `GitHubApi` | JSON API 基址，可指向兼容 GitHub API 的镜像/加速服务 | `https://api.github.com` |
+| `GitHubMirror` | **下载镜像模板**（对标 OCAT 的镜像配置）：`{url}` 占位符或纯前缀两种写法，留空直连 | — |
 | `Timeout` / `Retries` | 网络超时秒数 / 重试次数 | 30 / 3 |
 | `Prerelease` | 默认接受预发布 kext | false |
 | `Color` | ANSI 颜色 | true |
@@ -71,6 +73,27 @@ ockit settings validate   # 类型校验
 查找顺序与 checklist 一致：`--settings`（全局，置于子命令前）> 环境变量
 `OCKIT_SETTINGS` > 当前目录 > 脚本同目录 > `~/.ockit/OckitSettings.plist` > 内置默认。
 示例——配好 `DefaultEFI` 后，`ockit validate` / `ockit kext list` 无需任何参数。
+
+### GitHub 镜像（国内加速，对标 OCAT）
+
+`GitHubMirror` 只重写**下载 URL**（release 资产、OpenCore zip），API JSON 走 `GitHubApi`：
+
+```xml
+<!-- 前缀风格（ghproxy 系镜像通用） -->
+<key>GitHubMirror</key>
+<string>https://ghproxy.net/</string>
+
+<!-- 或 {url} 占位符风格 -->
+<key>GitHubMirror</key>
+<string>https://mirror.example.com/?u={url}</string>
+
+<!-- API 也可换基址（需镜像方兼容 GitHub REST API） -->
+<key>GitHubApi</key>
+<string>https://ghapi.example.com</string>
+```
+
+使用镜像时每次下载会打印实际 URL（降级可见）；注意各镜像站可用性多变，请自行选择
+当前可用的服务。另外规避 API 限流优先用 `GitHubToken`（镜像治下载，token 治限流）。
 
 ## kext checklist：可自行维护的上游清单（对比 OCAT 的核心改进）
 
