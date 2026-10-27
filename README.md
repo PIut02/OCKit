@@ -5,21 +5,8 @@
 
 ## 安装
 
-三种方式，按需选择：
-
-### 方式 A：独立二进制（零依赖，推荐给终端用户）
-
-推 tag（`v*`）后 GitHub Actions 自动在 **Windows / macOS(arm64+x64) / Linux** 四个
-runner 上用 PyInstaller 打包并挂到 Release，下载对应平台的单文件即可，**完全不需要
-安装 Python**：
-
-```bash
-# macOS 下载后需去掉隔离标记（未签名二进制）
-xattr -d com.apple.quarantine ockit-macos-arm64
-chmod +x ockit-macos-arm64 && ./ockit-macos-arm64 --help
-```
-
-### 方式 B：脚本直跑（推荐给开发者，唯一源头）
+ockit 只分发 **Python 脚本**，不打包二进制；Python 环境由使用者自行准备。
+ockit 仅依赖 Python 3.8+ 标准库，不需要 pip 安装任何东西。
 
 ```bash
 python ockit.py --help      # 任何 Python 3.8+，无需 pip
@@ -28,20 +15,13 @@ ockit.bat   # Windows
 ./ockit.sh  # macOS / Linux
 ```
 
-平台差异说明：
+各平台 Python 前提：
 
-| 平台 | 前提 |
+| 平台 | 说明 |
 |---|---|
-| Linux | `python3` 几乎都预装，开箱即用 |
+| Linux | `python3` 几乎都预装 |
 | macOS | 首次运行弹"安装命令行开发者工具"，确认后自动装好 python3 |
-| Windows | 需装一次 Python：`winget install Python.Python.3.12`（wrapper 会自动提示） |
-
-### 方式 C：本机自己打包
-
-```bash
-python -m pip install pyinstaller
-pyinstaller --onefile --clean --name ockit ockit.py
-```
+| Windows | 需装一次：`winget install Python.Python.3.12`（wrapper 会自动提示） |
 
 macOS 首次运行下载的辅助二进制（macserial/ocvalidate）可能被 Gatekeeper 拦截：
 
