@@ -5,12 +5,42 @@
 
 ## 安装
 
-```bash
-# 直接使用
-python ockit.py --help
+三种方式，按需选择：
 
-# 或者用包装脚本（Windows: ockit.bat / POSIX: ockit.sh）
-ockit --help
+### 方式 A：独立二进制（零依赖，推荐给终端用户）
+
+推 tag（`v*`）后 GitHub Actions 自动在 **Windows / macOS(arm64+x64) / Linux** 四个
+runner 上用 PyInstaller 打包并挂到 Release，下载对应平台的单文件即可，**完全不需要
+安装 Python**：
+
+```bash
+# macOS 下载后需去掉隔离标记（未签名二进制）
+xattr -d com.apple.quarantine ockit-macos-arm64
+chmod +x ockit-macos-arm64 && ./ockit-macos-arm64 --help
+```
+
+### 方式 B：脚本直跑（推荐给开发者，唯一源头）
+
+```bash
+python ockit.py --help      # 任何 Python 3.8+，无需 pip
+# 或用包装脚本（自动寻找 py/python3/python，找不到时给出安装指引）
+ockit.bat   # Windows
+./ockit.sh  # macOS / Linux
+```
+
+平台差异说明：
+
+| 平台 | 前提 |
+|---|---|
+| Linux | `python3` 几乎都预装，开箱即用 |
+| macOS | 首次运行弹"安装命令行开发者工具"，确认后自动装好 python3 |
+| Windows | 需装一次 Python：`winget install Python.Python.3.12`（wrapper 会自动提示） |
+
+### 方式 C：本机自己打包
+
+```bash
+python -m pip install pyinstaller
+pyinstaller --onefile --clean --name ockit ockit.py
 ```
 
 macOS 首次运行下载的辅助二进制（macserial/ocvalidate）可能被 Gatekeeper 拦截：
