@@ -47,14 +47,47 @@ xattr -d com.apple.quarantine ~/.ockit/cache/OpenCore-*/Utilities/**/macserial
 | `backup <efi>` | 打包 EFI 为带时间戳 zip | OCAT 备份 |
 | `check <config>` | 体检报告：校验结果 + 可选联网 kext 更新检查，可输出 markdown | 扩展 |
 
-## kext 上游数据库（内置）
+## kext checklist：可自行维护的上游清单（对比 OCAT 的核心改进）
+
+OCAT 的 kext 更新清单编译在程序里，用户无法修改。ockit 把它做成独立数据文件
+**`KextChecklist.plist`**（XML plist，任意编辑器可改）：
+
+```bash
+ockit checklist init          # 在当前目录生成可编辑模板
+ockit checklist show          # 查看当前生效清单及来源
+ockit checklist validate      # 校验条目完整性（Repo/Asset 正则/Provides）
+ockit kext check EFI --checklist 我的清单.plist   # 显式指定
+```
+
+条目字段：`Repo`（owner/repo）、`Asset`（资产名正则，**可为数组**——适配上游把多个
+kext 分装成多个 zip 的情况）、`Provides`（包内 .kext 列表）、`Prerelease`、
+`MinKernel`/`MaxKernel`、`Alias`。
+
+合并语义（用户文件 vs 内置默认）：
+
+| 操作 | 写法 |
+|---|---|
+| 覆盖内置条目（如换镜像源） | 写同名键，只列要改的字段，其余继承 |
+| 新增条目 | 写一个新键 |
+| 删除内置条目 | 顶层 `Remove` 数组 |
+| 停用条目 | 该条目加 `Disabled = true` |
+| 注释 | 任何以 `#` 开头的键 |
+
+文件查找顺序：`--checklist` 显式指定 > 环境变量 `OCKIT_CHECKLIST` > 当前目录 >
+脚本同目录 > `~/.ockit/KextChecklist.plist` > 内置默认（`kext check` 会显示实际来源，
+降级可见）。
+
+### 内置清单（19 项）
 
 Lilu / VirtualSMC 系 / AppleALC / NVMeFix / RestrictEvents / FeatureUnlock /
-BrightnessKeys / VoodooI2C / AMFIPass / ECEnabler / IntelBluetoothFirmware(含 BlueToolFixup) /
-NootedRed(weachy) / ForgedInvariant / SMCRadeonSensors / AMDRyzenCPUPowerManagement /
-USBToolBox / AirportItlwm(laobamac fork, Sequoia/Tahoe 分段) / SimpleHDA(laobamac)。
+BrightnessKeys / VoodooI2C / AMFIPass(kaoskinkae 镜像) / ECEnabler /
+IntelBluetoothFirmware(含 BlueToolFixup) / NootedRed(weachy) / ForgedInvariant /
+SMCRadeonSensors / AMDRyzenCPUPowerManagement / USBToolBox /
+AirportItlwm(laobamac fork, Sequoia/Tahoe 分段) / SimpleHDA(laobamac)。
 
-不在库中的 kext（如本地自生成的 USBMap.kext）会被标记为 `local/custom` 并跳过上游检查。
+不在清单中的 kext（如本地自生成的 USBMap.kext）会被标记为 `local/custom` 并跳过上游检查。
+注意：对"多 kext 合包"的条目（如 IntelBluetoothFirmware 包内的 BlueToolFixup），
+版本对比的是包的 release tag 而非该 kext 自身版本号。
 
 支持环境变量 `GITHUB_TOKEN` / `GH_TOKEN` 提升速率限制。
 
