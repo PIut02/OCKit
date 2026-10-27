@@ -47,6 +47,31 @@ xattr -d com.apple.quarantine ~/.ockit/cache/OpenCore-*/Utilities/**/macserial
 | `backup <efi>` | 打包 EFI 为带时间戳 zip | OCAT 备份 |
 | `check <config>` | 体检报告：校验结果 + 可选联网 kext 更新检查，可输出 markdown | 扩展 |
 
+## ockit 自身设置：OckitSettings.plist
+
+与 checklist 同机制的用户配置文件，免掉每次重复敲路径/开关：
+
+```bash
+ockit settings init       # 在当前目录生成模板
+ockit settings show       # 生效值 + 来源
+ockit settings validate   # 类型校验
+```
+
+| 键 | 作用 | 默认 |
+|---|---|---|
+| `DefaultEFI` | kext/snapshot/backup/oc upgrade 的默认 EFI 目录 | — |
+| `DefaultConfig` | validate/check 等的默认 config.plist | — |
+| `Checklist` | KextChecklist.plist 的额外查找位置 | — |
+| `BackupDir` | backup 默认输出目录 | EFI 同级 |
+| `GitHubToken` | GitHub API token（环境变量优先） | — |
+| `Timeout` / `Retries` | 网络超时秒数 / 重试次数 | 30 / 3 |
+| `Prerelease` | 默认接受预发布 kext | false |
+| `Color` | ANSI 颜色 | true |
+
+查找顺序与 checklist 一致：`--settings`（全局，置于子命令前）> 环境变量
+`OCKIT_SETTINGS` > 当前目录 > 脚本同目录 > `~/.ockit/OckitSettings.plist` > 内置默认。
+示例——配好 `DefaultEFI` 后，`ockit validate` / `ockit kext list` 无需任何参数。
+
 ## kext checklist：可自行维护的上游清单（对比 OCAT 的核心改进）
 
 OCAT 的 kext 更新清单编译在程序里，用户无法修改。ockit 把它做成独立数据文件

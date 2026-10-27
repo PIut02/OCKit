@@ -13,6 +13,10 @@
 - `checklist` show/init/validate：**kext 上游清单独立为 KextChecklist.plist**，
   用户可覆盖/新增/删除/停用条目（解决 OCAT 清单不可改的弊端）；
   Asset 支持数组以适配上游多 zip 分装
+- `settings` show/init/validate：**ockit 自身设置独立为 OckitSettings.plist**，
+  可配置 DefaultEFI/DefaultConfig/Checklist/BackupDir/GitHubToken/Timeout/
+  Retries/Prerelease/Color；kext/snapshot/oc/backup 的 EFI 参数与 validate/check 的
+  config 参数改为可选并支持设置回退
 - `smbios show/gen`（macserial 集成）
 - `oc download/upgrade/resync`（OpenCore 升级 + Sample.plist 键位同步）
 - `diff`（递归/仅键位）、`snapshot`（EFI 快照重建，含 PlugIns 子条目与内核段推断）
