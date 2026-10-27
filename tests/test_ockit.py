@@ -328,6 +328,111 @@ class ChecklistTest(unittest.TestCase):
         self.assertEqual(names, set(ockit.DEFAULT_CHECKLIST))
 
 
+class SettingsTest(unittest.TestCase):
+    """ockit 自身设置：OckitSettings.plist 的合并/解析/回退"""
+
+    def setUp(self):
+        ockit._SETTINGS.update({"loaded": False, "src": None,
+                                "data": dict(ockit.DEFAULT_SETTINGS)})
+        self._old_env = os.environ.pop("OCKIT_SETTINGS", None)
+
+    def tearDown(self):
+        if self._old_env is not None:
+            os.environ["OCKIT_SETTINGS"] = self._old_env
+        else:
+            os.environ.pop("OCKIT_SETTINGS", None)
+        ockit._SETTINGS.update({"loaded": False, "src": None,
+                                "data": dict(ockit.DEFAULT_SETTINGS)})
+
+    def test_defaults_when_no_file(self):
+        data, src = ockit.load_settings(None)
+        self.assertEqual(data["Timeout"], 30)
+        self.assertIn("builtin-default", src)
+
+    def test_explicit_file_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "S.plist"
+            user = {"Timeout": 7, "Retries": 1, "DefaultEFI": "E:/EFI",
+                    "Prerelease": True, "#note": "注释"}
+            p.write_bytes(plistlib.dumps(user, fmt=plistlib.FMT_XML))
+            data, src = ockit.load_settings(str(p))
+            self.assertEqual(data["Timeout"], 7)
+            self.assertEqual(data["Retries"], 1)
+            self.assertEqual(data["DefaultEFI"], "E:/EFI")
+            self.assertTrue(data["Prerelease"])
+            self.assertEqual(data["Color"], True)  # 未覆盖字段继承默认
+            self.assertEqual(src, str(p))
+
+    def test_env_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "Env.plist"
+            p.write_bytes(plistlib.dumps({"Timeout": 99}, fmt=plistlib.FMT_XML))
+            os.environ["OCKIT_SETTINGS"] = str(p)
+            data, src = ockit.load_settings(None)
+            self.assertEqual(data["Timeout"], 99)
+            self.assertEqual(src, str(p))
+
+    def test_token_in_gh_headers(self):
+        ockit._SETTINGS["data"]["GitHubToken"] = "ghp_testtoken"
+        ockit._SETTINGS["loaded"] = True
+        h = ockit._gh_headers()
+        self.assertEqual(h.get("Authorization"), "Bearer ghp_testtoken")
+        # 环境变量优先于 settings
+        os.environ["GITHUB_TOKEN"] = "envtoken"
+        try:
+            h = ockit._gh_headers()
+            self.assertEqual(h.get("Authorization"), "Bearer envtoken")
+        finally:
+            os.environ.pop("GITHUB_TOKEN", None)
+
+    def test_resolve_efi_and_config(self):
+        ns_efi = argparse_ns = type("NS", (), {"efi": None, "config": None})()
+        with self.assertRaises(ockit.ToolError):
+            ockit.resolve_efi(None)
+        ockit._SETTINGS["data"]["DefaultEFI"] = "E:/myEFI"
+        ockit._SETTINGS["loaded"] = True
+        self.assertEqual(ockit.resolve_efi(None), Path("E:/myEFI"))
+        self.assertEqual(ockit.resolve_efi("X:/other"), Path("X:/other"))
+        self.assertEqual(ockit.resolve_config(None, Path("E:/myEFI")),
+                         Path("E:/myEFI/OC/config.plist"))
+        ockit._SETTINGS["data"]["DefaultConfig"] = "C:/cfg.plist"
+        self.assertEqual(ockit.resolve_config(None, None), Path("C:/cfg.plist"))
+        del argparse_ns  # 未使用，防误读
+
+    def test_checklist_via_settings(self):
+        with tempfile.TemporaryDirectory() as td:
+            ck = Path(td) / "Custom.plist"
+            ck.write_bytes(plistlib.dumps(
+                {"ViaSettings": {"Repo": "s/S", "Asset": "a.zip",
+                                 "Provides": ["ViaSettings.kext"]}},
+                fmt=plistlib.FMT_XML))
+            st = Path(td) / "S.plist"
+            st.write_bytes(plistlib.dumps({"Checklist": str(ck)}, fmt=plistlib.FMT_XML))
+            ockit.load_settings(str(st))
+            db, src = ockit.load_checklist(None)
+            self.assertIn("ViaSettings", db)
+            self.assertEqual(src, str(ck))
+            ockit._CHECKLIST_STATE.update({"db": None, "src": None})
+
+    def test_settings_init_and_validate_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "OckitSettings.plist"
+            ns = type("NS", (), {"action": "init", "path": str(p), "force": False})()
+            self.assertEqual(ockit.cmd_settings(ns), 0)
+            with open(p, "rb") as f:
+                data = plistlib.load(f)
+            self.assertIn("#comment", data)
+            self.assertEqual(data["Timeout"], ockit.DEFAULT_SETTINGS["Timeout"])
+            ns2 = type("NS", (), {"action": "validate", "path": str(p)})()
+            self.assertEqual(ockit.cmd_settings(ns2), 0)
+            # 非法类型
+            bad = Path(td) / "Bad.plist"
+            bad.write_bytes(plistlib.dumps({"Timeout": "not-int"}, fmt=plistlib.FMT_XML))
+            ns3 = type("NS", (), {"action": "validate", "path": str(bad)})()
+            with self.assertRaises(ockit.ToolError):
+                ockit.cmd_settings(ns3)
+
+
 class KextDbTest(unittest.TestCase):
     def test_lookup(self):
         self.assertEqual(ockit.kext_db_lookup("Lilu.kext")[0], "Lilu")

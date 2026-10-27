@@ -46,11 +46,11 @@ class ToolError(Exception):
     """可预期的用户级错误（打印信息后以退出码 2 结束）。"""
 
 
-ANSI = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+COLOR_ENABLED = [sys.stdout.isatty() and os.environ.get("NO_COLOR") is None]
 
 
 def _c(code, s):
-    return f"\033[{code}m{s}\033[0m" if ANSI else str(s)
+    return f"\033[{code}m{s}\033[0m" if COLOR_ENABLED[0] else str(s)
 
 
 def ok(s):   print(_c("32", "[OK]  ") + str(s))
@@ -116,13 +116,17 @@ def _gh_headers():
         "Accept": "application/vnd.github+json",
         "User-Agent": f"ockit/{VERSION}",
     }
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+             or settings_get("GitHubToken"))
     if token:
         h["Authorization"] = f"Bearer {token}"
     return h
 
 
-def gh_get(url, timeout=30, retries=3):
+def gh_get(url, timeout=None, retries=None):
+    s = get_settings()
+    timeout = int(timeout or s.get("Timeout") or 30)
+    retries = int(retries if retries is not None else s.get("Retries") or 3)
     last = None
     for i in range(retries):
         try:
@@ -150,9 +154,12 @@ def gh_latest_release(repo, include_prerelease=False):
     return gh_get(f"{GH_API}/repos/{repo}/releases/latest")
 
 
-def gh_download(url, dest, timeout=120, retries=3):
+def gh_download(url, dest, timeout=None, retries=None):
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    s = get_settings()
+    timeout = int(timeout or s.get("Timeout") or 120)
+    retries = int(retries if retries is not None else s.get("Retries") or 3)
     last = None
     for i in range(retries):
         try:
@@ -186,6 +193,129 @@ def cache_dir():
     d = Path.home() / ".ockit" / "cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ----------------------------------------------------------------------------
+# ockit 自身设置（OckitSettings.plist，机制与 checklist 同构）
+#
+# 查找顺序：--settings 显式 > 环境变量 OCKIT_SETTINGS > 当前目录 >
+#           脚本同目录 > ~/.ockit/OckitSettings.plist > 内置默认
+# 可配置项（顶层键，全部可选）：
+#   DefaultEFI    — kext/snapshot/oc upgrade 的默认 EFI 目录
+#   DefaultConfig — validate/check 等的默认 config.plist 路径
+#   Checklist     — KextChecklist.plist 的额外查找位置
+#   BackupDir     — backup 默认输出目录
+#   GitHubToken   — GitHub API token（环境变量 GITHUB_TOKEN/GH_TOKEN 优先）
+#   Timeout / Retries — 网络超时秒数 / 重试次数
+#   Prerelease    — kext check/install 默认接受预发布版
+#   Color         — 是否使用 ANSI 颜色
+# ----------------------------------------------------------------------------
+
+SETTINGS_FILENAME = "OckitSettings.plist"
+
+DEFAULT_SETTINGS = {
+    "DefaultEFI": "",
+    "DefaultConfig": "",
+    "Checklist": "",
+    "BackupDir": "",
+    "GitHubToken": "",
+    "Timeout": 30,
+    "Retries": 3,
+    "Prerelease": False,
+    "Color": True,
+}
+
+_SETTINGS = {"loaded": False, "src": None, "data": dict(DEFAULT_SETTINGS)}
+
+COLOR_ENABLED = [True]  # 容器化全局，settings 加载后可翻转
+
+
+def settings_header_comment():
+    return (
+        "ockit 自身设置。所有键可选，缺省值见下；未知键会被忽略并告警。\n"
+        "查找顺序：--settings > 环境变量 OCKIT_SETTINGS > 当前目录 >\n"
+        "脚本同目录 > ~/.ockit/OckitSettings.plist > 内置默认。\n"
+        "生成模板：ockit settings init"
+    )
+
+
+def _find_settings_file(explicit=None):
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit))
+    env = os.environ.get("OCKIT_SETTINGS")
+    if env:
+        candidates.append(Path(env))
+    try:
+        candidates.append(Path.cwd() / SETTINGS_FILENAME)
+    except OSError:
+        pass
+    candidates.append(Path(__file__).resolve().parent / SETTINGS_FILENAME)
+    candidates.append(Path.home() / ".ockit" / SETTINGS_FILENAME)
+    for c in candidates:
+        if c and c.is_file():
+            return c
+    return None
+
+
+def load_settings(explicit=None):
+    """加载生效设置，返回 (data, source 描述)。幂等：explicit 变化时重载。"""
+    force = explicit is not None
+    if _SETTINGS["loaded"] and not force:
+        return _SETTINGS["data"], _SETTINGS["src"]
+    path = _find_settings_file(explicit)
+    data = copy.deepcopy(DEFAULT_SETTINGS)
+    if path:
+        with open(path, "rb") as f:
+            user = plistlib.load(f)
+        if not isinstance(user, dict):
+            raise ToolError(f"{path}: settings 根必须是 dict")
+        for k, v in user.items():
+            if str(k).startswith("#"):
+                continue
+            if k not in DEFAULT_SETTINGS:
+                warn(f"settings 未知键 {k}，已忽略")
+                continue
+            data[k] = v
+        src = str(path)
+    else:
+        src = "builtin-default（未找到外部 settings）"
+    _SETTINGS["loaded"] = True
+    _SETTINGS["src"] = src
+    _SETTINGS["data"] = data
+    COLOR_ENABLED[0] = bool(data.get("Color", True)) and os.environ.get("NO_COLOR") is None
+    return data, src
+
+
+def get_settings():
+    if not _SETTINGS["loaded"]:
+        load_settings(None)
+    return _SETTINGS["data"]
+
+
+def settings_get(key, default=None):
+    v = get_settings().get(key, default)
+    return v if v not in ("", None) else default
+
+
+def resolve_efi(args_efi):
+    """命令的 EFI 目录解析：CLI 参数 > settings.DefaultEFI。"""
+    p = args_efi or settings_get("DefaultEFI")
+    if not p:
+        raise ToolError("未指定 EFI 目录（传参或用 settings 的 DefaultEFI）")
+    return Path(p)
+
+
+def resolve_config(args_config, efi_dir=None):
+    """config 路径解析：CLI 参数 > settings.DefaultConfig > EFI/OC/config.plist。"""
+    if args_config:
+        return Path(args_config)
+    p = settings_get("DefaultConfig")
+    if p:
+        return Path(p)
+    if efi_dir:
+        return Path(efi_dir) / "OC" / "config.plist"
+    raise ToolError("未指定 config.plist（传参或用 settings 的 DefaultConfig）")
 
 
 def download_oc_release(version=None, include_prerelease=False):
@@ -327,6 +457,9 @@ def load_checklist(explicit=None):
     env = os.environ.get("OCKIT_CHECKLIST")
     if env:
         candidates.append(Path(env))
+    ck = settings_get("Checklist")  # settings 的 Checklist 位置
+    if ck:
+        candidates.append(Path(ck))
     try:
         candidates.append(Path.cwd() / CHECKLIST_FILENAME)
     except OSError:
@@ -740,9 +873,11 @@ def cmd_kext(args):
     src = set_checklist(getattr(args, "checklist", None))
     if args.action in ("check", "install", "update"):
         info_line(f"checklist 来源: {src}")
-    efi = Path(args.efi)
+    efi = resolve_efi(args.efi)
+    s = get_settings()
+    args.prerelease = bool(getattr(args, "prerelease", False)) or bool(s.get("Prerelease"))
     kexts_dir = efi / "OC" / "Kexts"
-    cfg_path = args.config or (efi / "OC" / "config.plist")
+    cfg_path = resolve_config(args.config, efi)
     cfg, fmt = load_plist(cfg_path)
 
     if args.action == "list":
@@ -1073,7 +1208,8 @@ def cmd_oc(args):
     if args.action == "download":
         ok(f"OpenCore {tag} 已缓存于 {oc_root}")
         return 0
-    efi = Path(args.efi)
+    efi = resolve_efi(args.efi)
+    config = resolve_config(args.config, efi)
     if args.action == "upgrade":
         sample = oc_root / "X64" / "EFI" / "OC" / "config.plist"
         replaced = []
@@ -1095,7 +1231,7 @@ def cmd_oc(args):
         ok(f"已替换二进制: {', '.join(replaced)}")
         info_line(f"config 与 Sample({tag}) 的键位差异如下（不自动修改）：")
         sample_cfg, _ = load_plist(sample)
-        user_cfg, _ = load_plist(args.config or (efi / "OC" / "config.plist"))
+        user_cfg, _ = load_plist(config)
         report_diff(sample_cfg, user_cfg, base="", only_schema=True)
         return 0
     if args.action == "resync":
@@ -1248,8 +1384,9 @@ def validate_config(cfg, efi_dir, out=print):
 
 
 def cmd_validate(args):
-    cfg, _ = load_plist(args.config)
-    efi_dir = Path(args.config).parent.parent
+    config = resolve_config(args.config)
+    cfg, _ = load_plist(config)
+    efi_dir = config.parent.parent
     problems, warnings = validate_config(cfg, efi_dir)
     if args.ocvalidate or args.download:
         binpath = Path(args.ocvalidate) if args.ocvalidate else None
@@ -1271,9 +1408,9 @@ def cmd_validate(args):
 
 def cmd_snapshot(args):
     set_checklist(getattr(args, "checklist", None))
-    efi = Path(args.efi)
+    efi = resolve_efi(args.efi)
     oc_dir = efi / "OC"
-    cfg_path = Path(args.config) if args.config else oc_dir / "config.plist"
+    cfg_path = resolve_config(args.config, efi)
     cfg, fmt = load_plist(cfg_path)
 
     old_acpi = {a.get("Path"): a for a in cfg_get(cfg, "ACPI.Add", [])}
@@ -1336,9 +1473,14 @@ def cmd_snapshot(args):
 
 
 def cmd_backup(args):
-    efi = Path(args.efi)
+    efi = resolve_efi(args.efi)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = Path(args.out) if args.out else efi.parent / f"EFI-backup-{stamp}.zip"
+    name = f"EFI-backup-{stamp}.zip"
+    if args.out:
+        out = Path(args.out)
+    else:
+        bdir = settings_get("BackupDir")
+        out = (Path(bdir) if bdir else efi.parent) / name
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(efi.rglob("*")):
             if f.is_file():
@@ -1348,11 +1490,12 @@ def cmd_backup(args):
 
 
 def cmd_check(args):
-    cfg, _ = load_plist(args.config)
-    efi_dir = Path(args.config).parent.parent
+    config = resolve_config(args.config)
+    cfg, _ = load_plist(config)
+    efi_dir = config.parent.parent
     problems, warnings = validate_config(cfg, efi_dir, out=lambda s: print(s))
     lines = [f"# ockit 体检报告 — {datetime.now():%Y-%m-%d %H:%M}",
-             f"- config: `{args.config}`",
+             f"- config: `{config}`",
              f"- 校验: {len(problems)} 错误 / {len(warnings)} 警告"]
     if args.net:
         info_line("检查 kext 上游更新 ...")
@@ -1455,6 +1598,47 @@ def cmd_checklist(args):
     return 1
 
 
+# ---- settings ----------------------------------------------------------------
+
+
+def cmd_settings(args):
+    if args.action == "show":
+        data, src = load_settings(args.path)
+        print(f"settings 来源: {src}")
+        for k in DEFAULT_SETTINGS:
+            v = data.get(k)
+            if k == "GitHubToken" and v:
+                v = str(v)[:4] + "****"
+            print(f"{k:<14} {v}")
+        return 0
+
+    if args.action == "init":
+        target = Path(args.path) if args.path else Path.cwd() / SETTINGS_FILENAME
+        if target.exists() and not args.force:
+            raise ToolError(f"{target} 已存在（用 --force 覆盖）")
+        out = {"#comment": settings_header_comment()}
+        out.update(copy.deepcopy(DEFAULT_SETTINGS))
+        save_plist(out, target, plistlib.FMT_XML)
+        ok(f"已生成可编辑 settings: {target}")
+        info_line("编辑后放置于 当前目录 / 脚本同目录 / ~/.ockit/ 均可生效")
+        return 0
+
+    if args.action == "validate":
+        data, src = load_settings(args.path)
+        problems = []
+        type_map = {"Timeout": int, "Retries": int, "Prerelease": bool, "Color": bool}
+        for k, v in data.items():
+            if k in type_map and not isinstance(v, type_map[k]):
+                problems.append(f"{k}: 应为 {type_map[k].__name__}，实际 {type(v).__name__}")
+        for p in problems:
+            fail(p)
+        if problems:
+            raise ToolError(f"settings 校验失败（来源: {src}）")
+        ok(f"settings 校验通过（来源: {src}）")
+        return 0
+    return 1
+
+
 # ----------------------------------------------------------------------------
 # 命令行入口
 # ----------------------------------------------------------------------------
@@ -1464,6 +1648,7 @@ def build_parser():
     ap = argparse.ArgumentParser(prog="ockit",
                                  description="OpenCore EFI 命令行工具箱（OCAT 的 CLI 等价 + 扩展）")
     ap.add_argument("--version", action="version", version=f"ockit {VERSION}")
+    ap.add_argument("--settings", help="指定 OckitSettings.plist 路径（全局，置于子命令前）")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("info", help="打印 config 概要")
@@ -1488,7 +1673,7 @@ def build_parser():
     p = sub.add_parser("kext", help="kext list/check/install/update/enable/disable/remove")
     p.add_argument("action", choices=["list", "check", "install", "update",
                                       "enable", "disable", "remove"])
-    p.add_argument("efi", help="EFI 目录")
+    p.add_argument("efi", nargs="?", help="EFI 目录（可用 settings 的 DefaultEFI）")
     p.add_argument("kext", nargs="?", help="kext 名（可省略）")
     p.add_argument("--config", help="config 路径（默认 EFI/OC/config.plist）")
     p.add_argument("--version", dest="version", help="指定上游版本")
@@ -1526,7 +1711,7 @@ def build_parser():
 
     p = sub.add_parser("oc", help="OpenCore download/upgrade/resync")
     p.add_argument("action", choices=["download", "upgrade", "resync"])
-    p.add_argument("efi", nargs="?", help="EFI 目录")
+    p.add_argument("efi", nargs="?", help="EFI 目录（upgrade/resync 必需，可用 settings）")
     p.add_argument("--config", help="config 路径")
     p.add_argument("--version", dest="version", help="指定 OC 版本")
     p.set_defaults(func=cmd_oc)
@@ -1538,13 +1723,13 @@ def build_parser():
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("validate", help="内置校验 + 可选 ocvalidate")
-    p.add_argument("config")
+    p.add_argument("config", nargs="?", help="config 路径（可用 settings 的 DefaultConfig）")
     p.add_argument("--ocvalidate", help="指定 ocvalidate 路径")
     p.add_argument("--download", action="store_true", help="自动下载 OpenCore 并用官方 ocvalidate")
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser("snapshot", help="按 EFI 目录重建 ACPI/kext/driver 条目")
-    p.add_argument("efi")
+    p.add_argument("efi", nargs="?", help="EFI 目录（可用 settings 的 DefaultEFI）")
     p.add_argument("--config")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--checklist", help="指定 KextChecklist.plist 路径")
@@ -1558,15 +1743,21 @@ def build_parser():
     p.set_defaults(func=cmd_checklist)
 
     p = sub.add_parser("backup", help="打包 EFI 目录")
-    p.add_argument("efi")
+    p.add_argument("efi", nargs="?", help="EFI 目录（可用 settings 的 DefaultEFI）")
     p.add_argument("--out")
     p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("check", help="体检报告（校验 + 可选上游检查）")
-    p.add_argument("config")
+    p.add_argument("config", nargs="?", help="config 路径（可用 settings 的 DefaultConfig）")
     p.add_argument("--net", action="store_true", help="联网检查 kext 更新")
     p.add_argument("--markdown", help="输出 markdown 报告路径")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("settings", help="ockit 自身设置 show/init/validate")
+    p.add_argument("action", choices=["show", "init", "validate"])
+    p.add_argument("path", nargs="?", help="settings 文件路径")
+    p.add_argument("--force", action="store_true", help="init 覆盖已有文件")
+    p.set_defaults(func=cmd_settings)
 
     return ap
 
@@ -1575,6 +1766,7 @@ def main(argv=None):
     ap = build_parser()
     ns = ap.parse_args(argv)
     try:
+        load_settings(getattr(ns, "settings", None))
         return ns.func(ns) or 0
     except ToolError as e:
         fail(str(e))
