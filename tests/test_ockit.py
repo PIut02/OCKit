@@ -442,5 +442,55 @@ class KextDbTest(unittest.TestCase):
         self.assertIsNone(ockit.kext_db_lookup("USBMap.kext"))  # 本地自生成件
 
 
+class GitHubMirrorTest(unittest.TestCase):
+    """GitHub API 基址与下载镜像配置"""
+
+    def setUp(self):
+        ockit._SETTINGS.update({"loaded": False, "src": None,
+                                "data": dict(ockit.DEFAULT_SETTINGS)})
+
+    def tearDown(self):
+        ockit._SETTINGS.update({"loaded": False, "src": None,
+                                "data": dict(ockit.DEFAULT_SETTINGS)})
+
+    def test_api_url_default_and_override(self):
+        self.assertEqual(ockit.api_url("/repos/a/b"), "https://api.github.com/repos/a/b")
+        ockit._SETTINGS["data"]["GitHubApi"] = "https://ghapi.example.com/"
+        ockit._SETTINGS["loaded"] = True
+        self.assertEqual(ockit.api_url("/repos/a/b"), "https://ghapi.example.com/repos/a/b")
+
+    def test_apply_mirror_off_by_default(self):
+        url = "https://github.com/a/b/releases/download/v1/x.zip"
+        self.assertEqual(ockit.apply_mirror(url), url)
+
+    def test_apply_mirror_prefix_style(self):
+        ockit._SETTINGS["data"]["GitHubMirror"] = "https://ghproxy.net/"
+        ockit._SETTINGS["loaded"] = True
+        url = "https://github.com/a/b/releases/download/v1/x.zip"
+        self.assertEqual(ockit.apply_mirror(url),
+                         "https://ghproxy.net/https://github.com/a/b/releases/download/v1/x.zip")
+
+    def test_apply_mirror_url_template_style(self):
+        ockit._SETTINGS["data"]["GitHubMirror"] = "https://mirror.example.com/?u={url}"
+        ockit._SETTINGS["loaded"] = True
+        url = "https://github.com/a/b/releases/download/v1/x.zip"
+        self.assertEqual(ockit.apply_mirror(url),
+                         "https://mirror.example.com/?u=https://github.com/a/b/releases/download/v1/x.zip")
+        # 显式传参覆盖 settings
+        self.assertEqual(ockit.apply_mirror(url, ""), url)
+
+
+class GitHubMirrorSettingsTest(unittest.TestCase):
+    def test_settings_init_contains_mirror_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "S.plist"
+            ns = type("NS", (), {"action": "init", "path": str(p), "force": False})()
+            ockit.cmd_settings(ns)
+            with open(p, "rb") as f:
+                data = plistlib.load(f)
+            self.assertIn("GitHubApi", data)
+            self.assertIn("GitHubMirror", data)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -147,11 +147,11 @@ def gh_get(url, timeout=None, retries=None):
 
 def gh_latest_release(repo, include_prerelease=False):
     if include_prerelease:
-        rels = gh_get(f"{GH_API}/repos/{repo}/releases?per_page=10")
+        rels = gh_get(api_url(f"/repos/{repo}/releases?per_page=10"))
         if not rels:
             raise ToolError(f"{repo}: 无任何 release")
         return rels[0]
-    return gh_get(f"{GH_API}/repos/{repo}/releases/latest")
+    return gh_get(api_url(f"/repos/{repo}/releases/latest"))
 
 
 def gh_download(url, dest, timeout=None, retries=None):
@@ -163,7 +163,10 @@ def gh_download(url, dest, timeout=None, retries=None):
     last = None
     for i in range(retries):
         try:
-            req = urllib.request.Request(url, headers=_gh_headers())
+            real_url = apply_mirror(url)
+            if real_url != url:
+                info_line(f"经镜像下载: {real_url}")
+            req = urllib.request.Request(real_url, headers=_gh_headers())
             with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
                 while True:
                     chunk = r.read(1 << 20)
@@ -206,6 +209,9 @@ def cache_dir():
 #   Checklist     — KextChecklist.plist 的额外查找位置
 #   BackupDir     — backup 默认输出目录
 #   GitHubToken   — GitHub API token（环境变量 GITHUB_TOKEN/GH_TOKEN 优先）
+#   GitHubApi     — JSON API 基址，默认 https://api.github.com，可指向兼容镜像
+#   GitHubMirror  — 下载镜像模板：含 {url} 占位符（如 https://ghproxy.net/{url}）
+#                   或纯前缀两种写法；留空直连
 #   Timeout / Retries — 网络超时秒数 / 重试次数
 #   Prerelease    — kext check/install 默认接受预发布版
 #   Color         — 是否使用 ANSI 颜色
@@ -219,6 +225,8 @@ DEFAULT_SETTINGS = {
     "Checklist": "",
     "BackupDir": "",
     "GitHubToken": "",
+    "GitHubApi": "",
+    "GitHubMirror": "",
     "Timeout": 30,
     "Retries": 3,
     "Prerelease": False,
@@ -298,6 +306,26 @@ def settings_get(key, default=None):
     return v if v not in ("", None) else default
 
 
+def api_url(path):
+    """按 settings 的 GitHubApi 组装 JSON API 地址。"""
+    base = (settings_get("GitHubApi") or GH_API).rstrip("/")
+    return f"{base}{path}"
+
+
+def apply_mirror(url, mirror=None):
+    """按 settings 的 GitHubMirror 重写下载 URL。
+
+    支持 {url} 占位符模板与纯前缀两种写法；未配置镜像时原样返回。
+    """
+    mirror = mirror if mirror is not None else settings_get("GitHubMirror")
+    if not mirror:
+        return url
+    mirror = str(mirror).rstrip("/")
+    if "{url}" in mirror:
+        return mirror.replace("{url}", url)
+    return f"{mirror}/{url}"
+
+
 def resolve_efi(args_efi):
     """命令的 EFI 目录解析：CLI 参数 > settings.DefaultEFI。"""
     p = args_efi or settings_get("DefaultEFI")
@@ -323,7 +351,7 @@ def download_oc_release(version=None, include_prerelease=False):
     rel = gh_latest_release("acidanthera/OpenCorePkg", include_prerelease)
     if version and rel["tag_name"] != version.lstrip("v"):
         # 尝试指定版本
-        rel = gh_get(f"{GH_API}/repos/acidanthera/OpenCorePkg/releases/tags/{version.lstrip('v')}")
+        rel = gh_get(api_url(f"/repos/acidanthera/OpenCorePkg/releases/tags/{version.lstrip('v')}"))
     asset = None
     for a in rel.get("assets", []):
         if a["name"].endswith("RELEASE.zip") and "DEBUG" not in a["name"]:
@@ -841,7 +869,7 @@ def pick_release_assets(repo, meta, prerelease=False, version=None):
     """
     rel = (gh_latest_release(repo, prerelease or meta.get("prerelease", False))
            if version is None
-           else gh_get(f"{GH_API}/repos/{repo}/releases/tags/{version.lstrip('v')}"))
+           else gh_get(api_url(f"/repos/{repo}/releases/tags/{version.lstrip('v')}")))
     pats = meta.get("asset")
     if isinstance(pats, str):
         pats = [pats]
