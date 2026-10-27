@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """ockit 单元测试（仅覆盖离线逻辑；网络相关命令用 mock/跳过）"""
 
+import os
 import plistlib
 import sys
 import tempfile
@@ -256,6 +257,75 @@ class ValidateTest(unittest.TestCase):
         cfg["Kernel"]["Add"][0]["MaxKernel"] = "bad"
         problems, _ = ockit.validate_config(cfg, Path("/nonexistent"), out=lambda s: None)
         self.assertTrue(any("MaxKernel 格式非法" in p for p in problems))
+
+
+class ChecklistTest(unittest.TestCase):
+    """kext checklist：独立 plist 维护 / 合并 / 解析顺序"""
+
+    def test_merge_override_add_remove_disable(self):
+        base = {
+            "Lilu": {"repo": "a/Lilu", "asset": r"Lilu-\d+-RELEASE\.zip", "provides": ["Lilu.kext"]},
+            "Old": {"repo": "a/Old", "asset": r"O-\d+\.zip", "provides": ["Old.kext"]},
+        }
+        user = {
+            "#comment": "hi",
+            "Lilu": {"Repo": "my-fork/Lilu", "MinKernel": "20.0.0"},   # 覆盖
+            "Mine": {"Repo": "me/Mine", "Asset": r"M-.*\.zip", "Provides": ["Mine.kext"]},  # 新增
+            "Remove": ["Old"],                                          # 删除
+            "Gone": {"Repo": "x/G", "Asset": "g.zip", "Provides": ["G.kext"], "Disabled": True},
+        }
+        db = ockit.merge_checklist(base, user)
+        self.assertEqual(db["Lilu"]["repo"], "my-fork/Lilu")
+        self.assertEqual(db["Lilu"]["asset"], r"Lilu-\d+-RELEASE\.zip")  # 未覆盖字段保留
+        self.assertEqual(db["Lilu"]["minkernel"], "20.0.0")              # 键名大小写归一
+        self.assertIn("Mine", db)
+        self.assertNotIn("Old", db)     # Remove 生效
+        self.assertNotIn("Gone", db)    # Disabled 生效
+
+    def test_resolution_order_and_lookup(self):
+        with tempfile.TemporaryDirectory() as td:
+            custom = Path(td) / "My.plist"
+            user = {"MyKext": {"Repo": "me/MyKext", "Asset": r"My-.*\.zip",
+                               "Provides": ["MyKext.kext"]}}
+            custom.write_bytes(plistlib.dumps(user, fmt=plistlib.FMT_XML))
+            db, src = ockit.load_checklist(str(custom))
+            self.assertIn("MyKext", db)
+            self.assertIn("Lilu", db)  # 内置默认仍在
+            self.assertEqual(src, str(custom))
+
+            ockit.set_checklist(str(custom))
+            self.assertEqual(ockit.kext_db_lookup("MyKext.kext")[0], "MyKext")
+            self.assertEqual(ockit.kext_db_lookup("Lilu.kext")[0], "Lilu")
+            # 还原，避免影响其他测试
+            ockit._CHECKLIST_STATE.update({"db": None, "src": None})
+
+    def test_env_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "Env.plist"
+            p.write_bytes(plistlib.dumps({"EnvOnly": {"Repo": "e/E", "Asset": "x.zip",
+                                                      "Provides": ["EnvOnly.kext"]}},
+                                         fmt=plistlib.FMT_XML))
+            old = os.environ.get("OCKIT_CHECKLIST")
+            os.environ["OCKIT_CHECKLIST"] = str(p)
+            try:
+                db, src = ockit.load_checklist(None)
+                self.assertIn("EnvOnly", db)
+                self.assertEqual(src, str(p))
+            finally:
+                if old is None:
+                    os.environ.pop("OCKIT_CHECKLIST", None)
+                else:
+                    os.environ["OCKIT_CHECKLIST"] = old
+            ockit._CHECKLIST_STATE.update({"db": None, "src": None})
+
+    def test_shipped_template_matches_builtin(self):
+        tpl = Path(ockit.__file__).resolve().parent / ockit.CHECKLIST_FILENAME
+        if not tpl.exists():
+            self.skipTest("KextChecklist.plist 未随仓库提交")
+        with open(tpl, "rb") as f:
+            data = plistlib.load(f)
+        names = {k for k in data if not str(k).startswith("#") and k != "Remove"}
+        self.assertEqual(names, set(ockit.DEFAULT_CHECKLIST))
 
 
 class KextDbTest(unittest.TestCase):

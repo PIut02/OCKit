@@ -238,10 +238,21 @@ def run_tool(binpath, args, timeout=60):
 
 
 # ----------------------------------------------------------------------------
-# kext 数据库：名字 -> 上游仓库 / 资产匹配 / 提供物 / MinKernel
+# kext checklist：上游取件清单（独立 plist 可由用户维护，解决 OCAT 清单不可改的弊端）
+#
+# 文件格式（XML plist）：
+#   - 顶层键 = 工具内部名（kext install/check 用的名字）
+#   - 每项：Repo("owner/repo") / Asset(资产名正则) / Provides(包内 .kext 列表)
+#           Prerelease(bool) / MinKernel / MaxKernel / Alias(对外别名)
+#   - 顶层 "Remove" 数组：按内部名删除内置条目
+#   - 条目里 "Disabled"=true：停用该条目
+#   - 以 "#" 开头的键视为注释
+#
+# 查找顺序：--checklist 显式 > 环境变量 OCKIT_CHECKLIST > 当前目录 >
+#           脚本同目录 > ~/.ockit/KextChecklist.plist > 内置默认
 # ----------------------------------------------------------------------------
 
-KEXTDB = {
+DEFAULT_CHECKLIST = {
     "Lilu": {"repo": "acidanthera/Lilu", "asset": r"Lilu-1\.\d+\.\d+-RELEASE\.zip",
              "provides": ["Lilu.kext"]},
     "VirtualSMC": {"repo": "acidanthera/VirtualSMC", "asset": r"VirtualSMC-\d+\.\d+\.\d+-RELEASE\.zip",
@@ -263,12 +274,13 @@ KEXTDB = {
     "VoodooI2C": {"repo": "acidanthera/VoodooI2C",
                   "asset": r"VoodooI2C-\d+\.\d+\.\d+-RELEASE\.zip",
                   "provides": ["VoodooI2C.kext", "VoodooI2CHID.kext"]},
-    "AMFIPass": {"repo": "dhinakg/AMFIPass", "asset": r"AMFIPass-\d+\.\d+\.\d+-RELEASE\.zip",
+    "AMFIPass": {"repo": "kaoskinkae/AMFIPass",
+                 "asset": r"AMFIPass\.kext\.zip",
                  "provides": ["AMFIPass.kext"]},
     "ECEnabler": {"repo": "1Revenger1/ECEnabler", "asset": r"ECEnabler-\d+\.\d+\.\d+-RELEASE\.zip",
                   "provides": ["ECEnabler.kext"]},
     "IntelBluetoothFirmware": {"repo": "OpenIntelWireless/IntelBluetoothFirmware",
-                               "asset": r"IntelBluetooth(Firmware)?-v?\d+\.\d+\.\d+-RELEASE\.zip",
+                               "asset": r"IntelBluetooth-v?\d+\.\d+\.\d+\.zip",
                                "provides": ["IntelBluetoothFirmware.kext", "IntelBTPatcher.kext",
                                             "BlueToolFixup.kext"]},
     "NootedRed": {"repo": "weachy/NootedRed", "asset": r"NootedRed-\d+\.\d+\.\d+-RELEASE\.zip",
@@ -280,7 +292,8 @@ KEXTDB = {
                          "asset": r"SMCRadeonSensors-v?\d+\.\d+\.\d+-RELEASE\.zip",
                          "provides": ["SMCRadeonSensors.kext"]},
     "AMDRyzenCPUPowerManagement": {"repo": "trulyspinach/SMCAMDProcessor",
-                                   "asset": r"SMCAMDProcessor-.*\.zip",
+                                   "asset": [r"AMDRyzenCPUPowerManagement\.kext\.zip",
+                                             r"SMCAMDProcessor\.kext\.zip"],
                                    "provides": ["AMDRyzenCPUPowerManagement.kext",
                                                 "SMCAMDProcessor.kext"]},
     "USBToolBox": {"repo": "corpnewt/USBToolBox", "asset": r"USBToolBox-\d+\.\d+\.\d+-RELEASE\.zip",
@@ -298,9 +311,68 @@ KEXTDB = {
                   "minkernel": "25.0.0"},
 }
 
-# 注意：补丁/kext 有本地自定义件（如 USBMap.kext、AppleMCEReporterDisabler.kext、
-# HoRNDIS.kext、SMCProcessorAMD.kext 自改版），不在 KEXTDB 中时 kext check 会标注
-# "local/custom" 并跳过上游检查。
+# 兼容别名（只读场景）
+KEXTDB = DEFAULT_CHECKLIST
+
+CHECKLIST_FILENAME = "KextChecklist.plist"
+
+_CHECKLIST_STATE = {"db": None, "src": None}
+
+
+def load_checklist(explicit=None):
+    """加载生效的 checklist，返回 (db, source 描述)。"""
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit))
+    env = os.environ.get("OCKIT_CHECKLIST")
+    if env:
+        candidates.append(Path(env))
+    try:
+        candidates.append(Path.cwd() / CHECKLIST_FILENAME)
+    except OSError:
+        pass
+    candidates.append(Path(__file__).resolve().parent / CHECKLIST_FILENAME)
+    candidates.append(Path.home() / ".ockit" / CHECKLIST_FILENAME)
+    for c in candidates:
+        if c and c.is_file():
+            with open(c, "rb") as f:
+                user = plistlib.load(f)
+            if not isinstance(user, dict):
+                raise ToolError(f"{c}: checklist 根必须是 dict")
+            return merge_checklist(DEFAULT_CHECKLIST, user), str(c)
+    return copy.deepcopy(DEFAULT_CHECKLIST), "builtin-default（未找到外部 checklist）"
+
+
+def merge_checklist(base, user):
+    """用户条目覆盖同名内置项 / 新增 / Remove 删除 / Disabled 停用。"""
+    db = {k: copy.deepcopy(v) for k, v in base.items() if not str(k).startswith("#")}
+    for name in user.get("Remove", []) or []:
+        db.pop(str(name), None)
+    for k, v in user.items():
+        if str(k).startswith("#") or k == "Remove":
+            continue
+        if not isinstance(v, dict):
+            warn(f"checklist 条目 {k} 不是 dict，已忽略")
+            continue
+        if v.get("Disabled"):
+            db.pop(str(k), None)
+            continue
+        entry = copy.deepcopy(db.get(str(k), {}))
+        for uk, uv in v.items():
+            entry[str(uk).lower()] = uv
+        db[str(k)] = entry
+    return db
+
+
+def set_checklist(explicit=None):
+    _CHECKLIST_STATE["db"], _CHECKLIST_STATE["src"] = load_checklist(explicit)
+    return _CHECKLIST_STATE["src"]
+
+
+def get_checklist():
+    if _CHECKLIST_STATE["db"] is None:
+        set_checklist(None)
+    return _CHECKLIST_STATE["db"], _CHECKLIST_STATE["src"]
 
 # kext 依赖排序
 LILU = "Lilu.kext"
@@ -514,7 +586,8 @@ def kext_db_lookup(bundle_base):
     if name in ("AirportItlwm",):
         # laobamac fork 提供两个分段版本
         return None
-    for db_name, meta in KEXTDB.items():
+    db, _ = get_checklist()
+    for db_name, meta in db.items():
         if bundle_base in meta.get("provides", []) or name == db_name:
             return db_name, meta
     return None
@@ -627,26 +700,46 @@ def collect_installed(kexts_dir):
     return out
 
 
-def pick_release_asset(repo, meta, prerelease=False, version=None):
+def pick_release_assets(repo, meta, prerelease=False, version=None):
+    """按 checklist 的 Asset（字符串或正则列表）挑选 release 资产。
+
+    返回 (release, [asset, ...])；Asset 为列表时逐个正则各匹配一个资产，
+    用于上游把多个 kext 分装成多个 zip 的情况（如 trulyspinach/SMCAMDProcessor）。
+    """
     rel = (gh_latest_release(repo, prerelease or meta.get("prerelease", False))
            if version is None
            else gh_get(f"{GH_API}/repos/{repo}/releases/tags/{version.lstrip('v')}"))
-    asset_re = re.compile(meta["asset"], re.I)
-    cands = []
-    for a in rel.get("assets", []):
-        n = a["name"]
-        if "DEBUG" in n.upper() or "dSYM" in n:
-            continue
-        if asset_re.search(n):
-            score = 0 if "RELEASE" in n.upper() else 1
-            cands.append((score, a))
-    if not cands:
-        raise ToolError(f"{repo} release {rel.get('tag_name')} 中没有匹配 {meta['asset']} 的资产")
-    cands.sort(key=lambda t: t[0])
-    return rel, cands[0][1]
+    pats = meta.get("asset")
+    if isinstance(pats, str):
+        pats = [pats]
+    chosen = []
+    for pat in pats:
+        rx = re.compile(pat, re.I)
+        cands = []
+        for a in rel.get("assets", []):
+            n = a["name"]
+            if "DEBUG" in n.upper() or "dSYM" in n:
+                continue
+            if rx.search(n):
+                score = 0 if "RELEASE" in n.upper() else 1
+                cands.append((score, a))
+        if not cands:
+            raise ToolError(f"{repo} release {rel.get('tag_name')} 中没有匹配 {pat} 的资产")
+        cands.sort(key=lambda t: t[0])
+        chosen.append(cands[0][1])
+    return rel, chosen
+
+
+# 向后兼容的旧名
+def pick_release_asset(repo, meta, prerelease=False, version=None):
+    rel, assets = pick_release_assets(repo, meta, prerelease, version)
+    return rel, assets[0]
 
 
 def cmd_kext(args):
+    src = set_checklist(getattr(args, "checklist", None))
+    if args.action in ("check", "install", "update"):
+        info_line(f"checklist 来源: {src}")
     efi = Path(args.efi)
     kexts_dir = efi / "OC" / "Kexts"
     cfg_path = args.config or (efi / "OC" / "config.plist")
@@ -692,21 +785,34 @@ def cmd_kext(args):
         return 0
 
     if args.action == "install":
-        db_name = args.kext if args.kext in KEXTDB else None
+        db, src = get_checklist()
+        db_name = args.kext if args.kext in db else None
         if db_name is None:
             hit = kext_db_lookup(args.kext if args.kext.endswith(".kext") else args.kext + ".kext")
             if hit is None:
-                raise ToolError(f"未知 kext: {args.kext}（可用: {' '.join(sorted(KEXTDB))}）")
-            db_name = hit[0]
-        meta = KEXTDB[db_name]
-        rel, asset = pick_release_asset(meta["repo"], meta, prerelease=args.prerelease,
-                                        version=args.version)
-        zpath = cache_dir() / asset["name"]
-        if not zpath.exists():
-            info_line(f"下载 {asset['name']} ...")
-            gh_download(asset["browser_download_url"], zpath)
-        installed = install_kexts_from_zip(zpath, kexts_dir,
-                                           wanted=set(meta.get("provides", [])) or None)
+                # Alias 兜底（如 AirportItlwm -> 两个分段条目）
+                aliases = [k for k, m in db.items() if m.get("alias") == args.kext]
+                if len(aliases) == 1:
+                    db_name = aliases[0]
+                elif len(aliases) > 1:
+                    raise ToolError(f"{args.kext} 有多个分段条目，请用其中之一: "
+                                    f"{' '.join(sorted(aliases))}")
+                else:
+                    raise ToolError(f"未知 kext: {args.kext}（可用: {' '.join(sorted(db))}；"
+                                    f"checklist 来源: {src}）")
+            else:
+                db_name = hit[0]
+        meta = db[db_name]
+        rel, assets = pick_release_assets(meta["repo"], meta, prerelease=args.prerelease,
+                                          version=args.version)
+        installed = []
+        for asset in assets:
+            zpath = cache_dir() / asset["name"]
+            if not zpath.exists():
+                info_line(f"下载 {asset['name']} ...")
+                gh_download(asset["browser_download_url"], zpath)
+            installed += install_kexts_from_zip(zpath, kexts_dir,
+                                                wanted=set(meta.get("provides", [])) or None)
         for name in installed:
             entry = make_kext_entry(Path(kexts_dir) / name,
                                     minkernel=meta.get("minkernel", ""),
@@ -730,7 +836,7 @@ def cmd_kext(args):
                 warn(f"{k['name']}: 多分段 kext，请用 install 明确目标")
                 continue
             try:
-                rel, asset = pick_release_asset(meta["repo"], meta, prerelease=args.prerelease)
+                rel, assets = pick_release_assets(meta["repo"], meta, prerelease=args.prerelease)
             except ToolError as e:
                 warn(f"{k['name']}: {e}")
                 continue
@@ -738,12 +844,14 @@ def cmd_kext(args):
             if k["version"] and upstream == str(k["version"]).lstrip("v"):
                 ok(f"{k['name']} 已是最新 ({upstream})")
                 continue
-            zpath = cache_dir() / asset["name"]
-            if not zpath.exists():
-                info_line(f"下载 {asset['name']} ...")
-                gh_download(asset["browser_download_url"], zpath)
-            installed = install_kexts_from_zip(zpath, kexts_dir,
-                                               wanted=set(meta.get("provides", [])) or None)
+            installed = []
+            for asset in assets:
+                zpath = cache_dir() / asset["name"]
+                if not zpath.exists():
+                    info_line(f"下载 {asset['name']} ...")
+                    gh_download(asset["browser_download_url"], zpath)
+                installed += install_kexts_from_zip(zpath, kexts_dir,
+                                                    wanted=set(meta.get("provides", [])) or None)
             for name in installed:
                 old = next((e for e in cfg_get(cfg, "Kernel.Add", [])
                             if _bundle_base(e["BundlePath"]) == name), None)
@@ -1162,6 +1270,7 @@ def cmd_validate(args):
 
 
 def cmd_snapshot(args):
+    set_checklist(getattr(args, "checklist", None))
     efi = Path(args.efi)
     oc_dir = efi / "OC"
     cfg_path = Path(args.config) if args.config else oc_dir / "config.plist"
@@ -1183,7 +1292,8 @@ def cmd_snapshot(args):
         mk = old.get("MinKernel", "")
         mxk = old.get("MaxKernel", "")
         if not mk:
-            for meta in KEXTDB.values():
+            db, _ = get_checklist()
+            for meta in db.values():
                 if p.name in meta.get("provides", []):
                     mk = meta.get("minkernel", mk)
                     mxk = meta.get("maxkernel", mxk)
@@ -1250,7 +1360,8 @@ def cmd_check(args):
         from contextlib import redirect_stdout
         buf = io.StringIO()
         ns = argparse.Namespace(efi=str(efi_dir), config=args.config, action="check",
-                                prerelease=False, kext=None, version=None, delete=False)
+                                prerelease=False, kext=None, version=None, delete=False,
+                                checklist=None)
         with redirect_stdout(buf):
             try:
                 cmd_kext(ns)
@@ -1266,6 +1377,82 @@ def cmd_check(args):
         Path(args.markdown).write_text(md, encoding="utf-8")
         ok(f"报告已写入 {args.markdown}")
     return 1 if problems else 0
+
+
+# ---- checklist ---------------------------------------------------------------
+
+
+def checklist_header_comment():
+    return (
+        "ockit kext checklist — 用户可维护的上游取件清单（解决 OCAT 清单不可改的弊端）\n"
+        "顶层键 = 工具内部名；字段：Repo(owner/repo)、Asset(资产名正则)、\n"
+        "Provides(包内 .kext 列表)、Prerelease(bool)、MinKernel/MaxKernel、Alias。\n"
+        "覆盖同名内置条目；新增键即新增条目；顶层 Remove 数组可删除内置条目；\n"
+        "条目内 Disabled=true 表示停用。查找顺序：--checklist > 环境变量 OCKIT_CHECKLIST\n"
+        "> 当前目录 > 脚本同目录 > ~/.ockit/KextChecklist.plist > 内置默认。"
+    )
+
+
+def cmd_checklist(args):
+    if args.action == "show":
+        src = set_checklist(args.checklist)
+        db, _ = get_checklist()
+        print(f"checklist 来源: {src}")
+        print(f"{'内部名':<28} {'仓库':<36} {'Provides'}")
+        for name, meta in sorted(db.items()):
+            print(f"{name:<28} {meta.get('repo','?'):<36} {', '.join(meta.get('provides', []))}")
+        return 0
+
+    if args.action == "init":
+        target = Path(args.path) if args.path else Path.cwd() / CHECKLIST_FILENAME
+        if target.exists() and not args.force:
+            raise ToolError(f"{target} 已存在（用 --force 覆盖）")
+        out = {"#comment": checklist_header_comment()}
+        for name, meta in DEFAULT_CHECKLIST.items():
+            item = {}
+            for k, v in meta.items():
+                if k == "alias":
+                    item["Alias"] = v
+                elif k == "minkernel":
+                    item["MinKernel"] = v
+                elif k == "maxkernel":
+                    item["MaxKernel"] = v
+                elif k == "prerelease":
+                    item["Prerelease"] = v
+                else:
+                    item[k.capitalize()] = v
+            out[name] = item
+        with open(target, "wb") as f:
+            plistlib.dump(out, f, fmt=plistlib.FMT_XML, sort_keys=False)
+        ok(f"已生成可编辑 checklist: {target}")
+        info_line("编辑后放置于 当前目录 / 脚本同目录 / ~/.ockit/ 均可生效")
+        return 0
+
+    if args.action == "validate":
+        path = Path(args.path) if args.path else None
+        db, src = load_checklist(path)
+        problems = []
+        for name, meta in db.items():
+            if not meta.get("repo"):
+                problems.append(f"{name}: 缺少 Repo")
+            if not meta.get("asset"):
+                problems.append(f"{name}: 缺少 Asset")
+            else:
+                pats = meta["asset"] if isinstance(meta["asset"], list) else [meta["asset"]]
+                for pat in pats:
+                    try:
+                        re.compile(pat)
+                    except re.error as e:
+                        problems.append(f"{name}: Asset 正则非法 ({e})")
+            if not meta.get("provides"):
+                problems.append(f"{name}: 缺少 Provides")
+        for p in problems:
+            fail(p)
+        if problems:
+            raise ToolError(f"checklist 校验失败（来源: {src}）")
+        ok(f"checklist 校验通过: {len(db)} 个条目（来源: {src}）")
+        return 0
+    return 1
 
 
 # ----------------------------------------------------------------------------
@@ -1307,6 +1494,7 @@ def build_parser():
     p.add_argument("--version", dest="version", help="指定上游版本")
     p.add_argument("--prerelease", action="store_true", help="接受预发布版")
     p.add_argument("--delete", action="store_true", help="remove 时连文件删除")
+    p.add_argument("--checklist", help="指定 KextChecklist.plist 路径")
     p.set_defaults(func=cmd_kext)
 
     p = sub.add_parser("acpi", help="ACPI list/enable/disable/add/remove")
@@ -1359,7 +1547,15 @@ def build_parser():
     p.add_argument("efi")
     p.add_argument("--config")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--checklist", help="指定 KextChecklist.plist 路径")
     p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("checklist", help="kext 上游清单 show/init/validate")
+    p.add_argument("action", choices=["show", "init", "validate"])
+    p.add_argument("path", nargs="?", help="checklist 文件路径")
+    p.add_argument("--checklist", help="show 时的外部 checklist")
+    p.add_argument("--force", action="store_true", help="init 覆盖已有文件")
+    p.set_defaults(func=cmd_checklist)
 
     p = sub.add_parser("backup", help="打包 EFI 目录")
     p.add_argument("efi")
