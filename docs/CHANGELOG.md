@@ -23,7 +23,7 @@
 - `oc download/upgrade/resync`（OpenCore 升级 + Sample.plist 键位同步）
 - `diff`（递归/仅键位）、`snapshot`（EFI 快照重建，含 PlugIns 子条目与内核段推断）
 - `backup` / `check`（体检报告，可输出 markdown）
-- 单元测试 19 项（离线逻辑全覆盖）
+- 单元测试 31 项（离线逻辑全覆盖）
 - 分发策略：仅 Python 脚本（stdlib-only），环境由使用者自行准备；
   launcher 负责寻找解释器并给出平台安装指引
 
